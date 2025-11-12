@@ -14,7 +14,6 @@ def display_menu():
     print("3. Exit")
 
 
-
 try :
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) #Create a UDP socket 
     print ('Socket created')
@@ -31,11 +30,16 @@ def RegisterClient(rq, name, role, host, port):
     s.sendto(msg.encode("utf-8"), ('localhost', 8888))
     d = s.recvfrom(1024)
     data = d[0]
-    addr = d[1]
     print ("Server reply : " + str(data.decode('utf-8')))
 
-def DeregisterClient(rq, name, role, host, port):
+def DeregisterClient(rq, name, host, port):
     msg = f"DE-REGISTER|{rq}|{name}|"
+    s.sendto(msg.encode("utf-8"), ('localhost', 8888))
+    d = s.recvfrom(1024)
+
+    data = d[0]
+    print ("Server reply : " + str(data.decode('utf-8')))
+
 
 
 
@@ -48,7 +52,7 @@ if __name__ == "__main__":
                 Name, Role = input("Enter name and Role: ").split()
                 RegisterClient("RQ1", Name, Role, "0.0.0.0", 8889)
             elif choice == '2':
-                DeregisterClient()
+                DeregisterClient("RQ1",Name, "0.0.0.0", 8889)
             else:
                 print("Invalid choice. Please try again.")
     except (socket.error) :

@@ -1,6 +1,6 @@
 import socket
 import sys
-
+import threading
 
 HOST = '0.0.0.0' # Symbolic name meaning all available interfaces
 PORT = 8888 # Arbitrary non-privileged port
@@ -15,32 +15,42 @@ RegisteredUsers = {}#Registered Users dictionary
 #ApplicationMessage = f"REGISTER|{payload_length:02d}|{UserMessage}".encode("utf-8")
 
 
-
 def RegistrationCheck(data, addr, Name, Role, IP_Address, UDP_Port):
     print(data)
     Request = data.decode("utf-8")
-    if(Request.startswith("REGISTER")):
-        #Registration Handling
-        if(Name not in RegisteredUsers):
-            RegisteredUsers[Name] = {
-                "Role": Role,
-                "IP_Address": IP_Address,
-                "UDP_Port": UDP_Port
-            }
-            print(f"User {Name} registered successfully.")
-            reply = "REGISTERED|RQ1|SUCCESS|".encode("utf-8")
-            s.sendto(reply, addr)
-            print("Registration request received")
-        else:
-            print("User already registered")
-            reply = "REGISTER-DENIED|RQ#|User already Exists".encode("utf-8")
-            s.sendto(reply, addr)
 
-    else:
-        reply = "REGISTER-DENIED|RQ#|Reason".encode("utf-8")
+    if(Name not in RegisteredUsers):
+        RegisteredUsers[Name] = {
+            "Role": Role,
+            "IP_Address": IP_Address,
+            "UDP_Port": UDP_Port
+        }
+        print(f"User {Name} registered successfully.")
+        reply = "REGISTERED|RQ1|SUCCESS|".encode("utf-8")
         s.sendto(reply, addr)
-        print("Unknown request received")
+    else:
+        print("User already registered")
+        reply = "REGISTER-DENIED|RQ#|User already Exists".encode("utf-8")
+        s.sendto(reply, addr)
+
+
+
+
+def Deregistration(data, addr, Name, Role, IP_Address, UDP_Port):
+    print(data)
+    Request = data.decode("utf-8")
     
+    if(Name in RegisteredUsers):
+        del RegisteredUsers[Name] 
+
+        print(f"User {Name} Has been deregistered successfully.")
+        reply = "DE-REGISTER |RQ1|SUCCESS|".encode("utf-8")
+        s.sendto(reply, addr)
+    else:
+####HOW TO HANDLE IF USER NOT REGISTERED? WHAT DOES IGNORE MEAN
+        print("User is not regitered yet")
+        reply = "REGISTER-DENIED|RQ#|User already Exists".encode("utf-8")
+        s.sendto(reply, addr)
 
 
     
@@ -71,19 +81,46 @@ while 1:
     else:
         data_string = data.decode("utf-8")
         Request = data_string.split('|')
+        command = Request[0]
+        args = Request[1:]
 
+
+    if(len(Request) == 7):
+            command = Request[0]
+            RequestID = Request[1]
+            Name = Request[2]
+            Role = Request[3]
+            IP_Address = Request[4]
+            UDP_Port = Request[5]
+    elif(len(Request) == 4):
         command = Request[0]
         RequestID = Request[1]
         Name = Request[2]
-        Role = Request[3]
-        IP_Address = Request[4]
-        UDP_Port = Request[5]
+    else:
+        command = "UNKNOWN"
+
 
     if( command == "REGISTER"):
         RegistrationCheck(d[0],d[1], Name, Role, IP_Address, UDP_Port)
-    
+    elif( command == "DE-REGISTER"):
+        print("DEREGISTERING NOW")
+        Deregistration(d[0],d[1], Name, Role, IP_Address, UDP_Port)
+    else:
+        print(len(Request))
+
+        reply = (+"REGISTER-DENIED|RQ#|Unkown Command").encode("utf-8")
+        s.sendto(reply, addr)
+        print("Unknown request received")
+
+
+        
+
+        
+
+        
+        
 #    reply = data
 #    s.sendto(reply, addr)
-    print ('Message[' + addr[0] + ':' + str(addr[1]) + '] - ' + data.decode("utf-8"))
+print ('Message[' + addr[0] + ':' + str(addr[1]) + '] - ' + data.decode("utf-8"))
 
 s.close()
