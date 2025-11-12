@@ -19,7 +19,7 @@ RegisteredUsers = {}#Registered Users dictionary
 def RegistrationCheck(data, addr, Name, Role, IP_Address, UDP_Port):
     print(data)
     Request = data.decode("utf-8")
-    if(data.decode("utf-8").startswith("REGISTER")):
+    if(Request.startswith("REGISTER")):
         #Registration Handling
         if(Name not in RegisteredUsers):
             RegisteredUsers[Name] = {
@@ -33,9 +33,9 @@ def RegistrationCheck(data, addr, Name, Role, IP_Address, UDP_Port):
             print("Registration request received")
         else:
             print("User already registered")
-            reply = "REGISTER-DENIED|RQ#|Reason".encode("utf-8")
+            reply = "REGISTER-DENIED|RQ#|User already Exists".encode("utf-8")
             s.sendto(reply, addr)
-       
+
     else:
         reply = "REGISTER-DENIED|RQ#|Reason".encode("utf-8")
         s.sendto(reply, addr)
@@ -69,7 +69,7 @@ while 1:
         break
     #Split incoming request into fields
     else:
-        data_string = "REGISTER|RQ1|asdafa|asdasf|0.0.0.0|8889|"
+        data_string = data.decode("utf-8")
         Request = data_string.split('|')
 
         command = Request[0]
