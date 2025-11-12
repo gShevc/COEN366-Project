@@ -6,6 +6,15 @@ import threading
 client_host = "0.0.0.0"
 client_port = 8889
 
+
+def display_menu():
+    print("\n--- Main Menu ---")
+    print("1. Register New User, Enter Name and Role")
+    print("2. Deregister User, Enter Name")
+    print("3. Exit")
+
+
+
 try :
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) #Create a UDP socket 
     print ('Socket created')
@@ -33,8 +42,15 @@ def DeregisterClient(rq, name, role, host, port):
 if __name__ == "__main__":
     try:
         while True:
-            Name, Role = input("Enter name and Role: ").split()
-            RegisterClient("RQ1", Name, Role, "0.0.0.0", 8889)
+            display_menu()
+            choice = input("Enter your choice (1-3): ").strip()
+            if choice == '1':
+                Name, Role = input("Enter name and Role: ").split()
+                RegisterClient("RQ1", Name, Role, "0.0.0.0", 8889)
+            elif choice == '2':
+                DeregisterClient()
+            else:
+                print("Invalid choice. Please try again.")
     except (socket.error) :
         print ("Error")
 
