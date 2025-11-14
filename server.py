@@ -85,42 +85,30 @@ while 1:
         args = Request[1:]
 
 
-    if(len(Request) == 7):
+    if(command == "REGISTER"):
             command = Request[0]
             RequestID = Request[1]
             Name = Request[2]
             Role = Request[3]
             IP_Address = Request[4]
             UDP_Port = Request[5]
-    elif(len(Request) == 4):
+
+            RegistrationCheck(d[0],d[1], Name, Role, IP_Address, UDP_Port)
+
+    elif(command == "DE-REGISTER"):
         command = Request[0]
         RequestID = Request[1]
         Name = Request[2]
-    else:
-        command = "UNKNOWN"
-
-
-    if( command == "REGISTER"):
-        RegistrationCheck(d[0],d[1], Name, Role, IP_Address, UDP_Port)
-    elif( command == "DE-REGISTER"):
-        print("DEREGISTERING NOW")
         Deregistration(d[0],d[1], Name, Role, IP_Address, UDP_Port)
-    else:
-        print(len(Request))
 
-        reply = (+"REGISTER-DENIED|RQ#|Unkown Command").encode("utf-8")
+    elif(command == "BACKUP_REQ"):
+        print("Backup request")
+
+    else:
+        reply = ("REGISTER-DENIED|RQ#|Unkown Command").encode("utf-8")
         s.sendto(reply, addr)
         print("Unknown request received")
 
 
-        
-
-        
-
-        
-        
-#    reply = data
-#    s.sendto(reply, addr)
-print ('Message[' + addr[0] + ':' + str(addr[1]) + '] - ' + data.decode("utf-8"))
-
+ 
 s.close()

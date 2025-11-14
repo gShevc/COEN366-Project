@@ -40,7 +40,13 @@ def DeregisterClient(rq, name, host, port):
     data = d[0]
     print ("Server reply : " + str(data.decode('utf-8')))
 
+def BackupRequest(rq, name, host, port):
+    msg = f"BACKUP_REQ|{rq}|{name}|"
+    s.sendto(msg.encode("utf-8"), ('localhost', 8888))
+    d = s.recvfrom(1024)
 
+    data = d[0]
+    print ("Server reply : " + str(data.decode('utf-8')))
 
 
 if __name__ == "__main__":
@@ -52,10 +58,11 @@ if __name__ == "__main__":
                 Name, Role = input("Enter name and Role: ").split()
                 RegisterClient("RQ1", Name, Role, "0.0.0.0", 8889)
             elif choice == '2':
-                Name = input("Please enter user to deregister: ");
+                Name = input("Please enter user to deregister: ")
                 DeregisterClient("RQ1",Name, "0.0.0.0", 8889)
-            elif choice == '3':
-                DeregisterClient("RQ1",Name, "0.0.0.0", 8889)
+            elif choice == '3':#BACKUP_REQ
+                Name = input("Back up:  ")
+                BackupRequest("RQ1",Name, "0.0.0.0", 8889)
             else:
                 print("Invalid choice. Please try again.")
     except (socket.error) :
