@@ -52,6 +52,9 @@ if __name__ == "__main__":
                 Name, Role = input("Enter name and Role: ").split()
                 RegisterClient("RQ1", Name, Role, "0.0.0.0", 8889)
             elif choice == '2':
+                Name = input("Please enter user to deregister: ");
+                DeregisterClient("RQ1",Name, "0.0.0.0", 8889)
+            elif choice == '3':
                 DeregisterClient("RQ1",Name, "0.0.0.0", 8889)
             else:
                 print("Invalid choice. Please try again.")
