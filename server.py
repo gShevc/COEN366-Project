@@ -5,6 +5,7 @@ import json
 import os
 import time
 import math
+import itertools
 
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 5000  # UDP port for P2PBRS server
@@ -17,6 +18,18 @@ HEARTBEAT_TIMEOUT = 60  # seconds, used only for logging
 # Use a re-entrant lock because some handlers (e.g., REGISTER) call
 # helper functions that also acquire the same lock.
 lock = threading.RLock()
+# UDP socket used by background threads to push control messages.
+server_sock = None
+# Simple server-side RQ# generator for internal messages (e.g., REPLICATE_REQ).
+_server_rq_counter = itertools.count(100000)
+
+
+def next_server_rq():
+    return str(next(_server_rq_counter))
+
+
+# Track chunks currently being replicated to avoid spamming requests.
+replicating_chunks = set()  # (owner, file_name, chunk_id_str)
 
 # In-memory state (persisted to JSON)
 # peers: name -> {
@@ -51,6 +64,7 @@ def load_state():
         # heartbeat is volatile (set to 0 on restart)
         for p in peers.values():
             p["last_heartbeat"] = 0.0
+            p["alive"] = True
     else:
         peers = {}
         files = {}
@@ -73,6 +87,81 @@ def peer_name_from_addr(addr):
         if p.get("ip") == ip and p.get("udp_port") == port:
             return name
     return None
+
+
+def send_udp_to_peer(peer_name, message):
+    """Send a control-plane UDP message to a specific peer if possible."""
+    global server_sock
+    if server_sock is None:
+        return False
+    p = peers.get(peer_name)
+    if not p:
+        return False
+    try:
+        server_sock.sendto(message.encode(), (p["ip"], p["udp_port"]))
+        return True
+    except OSError as e:
+        print(f"[SERVER] ERROR sending to {peer_name}: {e}")
+        return False
+
+
+def remove_peer_from_chunks(peer_name):
+    """Remove a peer from all chunk ownership lists and trigger replication."""
+    with lock:
+        for key, meta in files.items():
+            owner = meta["owner"]
+            file_name = meta["file_name"]
+            for cid_str, hosts in list(meta["chunks"].items()):
+                if peer_name in hosts:
+                    hosts[:] = [h for h in hosts if h != peer_name]
+                    if not hosts:
+                        meta["chunks"][cid_str] = []
+                    # Attempt to reallocate this chunk elsewhere.
+                    trigger_replication(owner, file_name, cid_str, meta)
+        save_state()
+
+
+def select_target_peer(exclude):
+    """Pick an alive storage-capable peer not in exclude."""
+    for name, p in peers.items():
+        if name in exclude:
+            continue
+        if p.get("role") not in ("STORAGE", "BOTH"):
+            continue
+        if not p.get("alive", True):
+            continue
+        return name
+    return None
+
+
+def trigger_replication(owner, file_name, cid_str, meta):
+    """
+    Ask a surviving host to replicate a chunk to another alive storage peer.
+    meta is the file's metadata dict.
+    """
+    key = (owner, file_name, cid_str)
+    hosts = meta["chunks"].get(cid_str, [])
+    # Need at least one source to copy from.
+    if not hosts:
+        print(f"[SERVER] Unable to replicate {file_name} chunk {cid_str}: no surviving copy.")
+        return
+
+    # Avoid duplicate requests while one is in flight.
+    if key in replicating_chunks:
+        return
+
+    # Choose a new target not already hosting the chunk.
+    target = select_target_peer(exclude=set(hosts))
+    if not target:
+        return
+
+    source = hosts[0]
+    target_peer = peers[target]
+    rq = next_server_rq()
+    msg = f"REPLICATE_REQ {rq} {owner} {file_name} {cid_str} {target} {target_peer['ip']} {target_peer['tcp_port']}"
+    if send_udp_to_peer(source, msg):
+        replicating_chunks.add(key)
+        print(f"[SERVER] Triggering replication of {file_name} chunk {cid_str} from {source} -> {target}")
 
 
 def handle_register(parts, addr):
@@ -99,6 +188,7 @@ def handle_register(parts, addr):
             "tcp_port": tcp_port,
             "storage_capacity": storage_cap,
             "last_heartbeat": time.time(),
+            "alive": True,
         }
         save_state()
 
@@ -117,7 +207,8 @@ def handle_deregister(parts, addr):
         if name in peers:
             print(f"[SERVER] DE-REGISTER: {name}")
             peers.pop(name)
-            # We keep file metadata (simulating backup still present somewhere)
+            # Remove from chunk lists and attempt reallocation
+            remove_peer_from_chunks(name)
             save_state()
 
     return f"DE-REGISTERED {rq}"
@@ -143,7 +234,7 @@ def handle_backup_req(parts, addr):
         # Select storage-capable peers (STORAGE or BOTH)
         storage_peers = [
             name for name, p in peers.items()
-            if p["role"] in ("STORAGE", "BOTH")
+            if p["role"] in ("STORAGE", "BOTH") and p.get("alive", True)
         ]
 
         if not storage_peers:
@@ -153,17 +244,18 @@ def handle_backup_req(parts, addr):
         if num_chunks == 0:
             num_chunks = 1
 
-        # Round-robin assignment: each chunk gets one storage peer
+        # Round-robin assignment: each chunk gets one or more storage peers (replicas)
+        replicas = min(2, len(storage_peers))  # aim for 2-way redundancy when possible
         chunk_to_peers = {}
         peer_assignments = {}  # peer_name -> [chunk_ids]
         idx = 0
         for chunk_id in range(num_chunks):
-            peer_name = storage_peers[idx % len(storage_peers)]
-            idx += 1
-
             cid_str = str(chunk_id)
-            chunk_to_peers.setdefault(cid_str, []).append(peer_name)
-            peer_assignments.setdefault(peer_name, []).append(chunk_id)
+            for r in range(replicas):
+                peer_name = storage_peers[idx % len(storage_peers)]
+                idx += 1
+                chunk_to_peers.setdefault(cid_str, []).append(peer_name)
+                peer_assignments.setdefault(peer_name, []).append(chunk_id)
 
         key = f"{owner}|{file_name}"
         files[key] = {
@@ -211,6 +303,10 @@ def handle_store_ack(parts, addr):
             chunks = meta["chunks"].setdefault(cid_str, [])
             if storage_peer not in chunks:
                 chunks.append(storage_peer)
+            # Clear replication-in-flight marker if this chunk now has a host.
+            key = (meta["owner"], file_name, cid_str)
+            if key in replicating_chunks and chunks:
+                replicating_chunks.discard(key)
         save_state()
 
     print(f"[SERVER] STORE_ACK: {storage_peer} stored chunk {cid_str} of {file_name}")
@@ -228,6 +324,7 @@ def handle_heartbeat(parts, addr):
         if p:
             p["last_heartbeat"] = time.time()
             p["stored_chunks"] = int(num_chunks_str)
+            p["alive"] = True
     # Optional heartbeat ACK
     return f"HEARTBEAT_ACK {rq} {name}"
 
@@ -256,7 +353,7 @@ def handle_restore_req(parts, addr):
         for cid_str, peer_list in chunks.items():
             for peer_name in peer_list:
                 p = peers.get(peer_name)
-                if not p:
+                if not p or not p.get("alive", True):
                     continue
                 peer_assign.setdefault(peer_name, []).append(int(cid_str))
 
@@ -301,6 +398,19 @@ def handle_backup_done(parts, addr):
     return f"BACKUP_DONE_ACK {rq} {file_name}"
 
 
+def handle_replicate_ack(parts):
+    # REPLICATE_ACK RQ# Owner File_Name Chunk_ID STATUS [Reason]
+    if len(parts) < 6:
+        return None
+    _, rq, owner, file_name, cid_str, status = parts[:6]
+    reason = " ".join(parts[6:]) if len(parts) > 6 else ""
+    key = (owner, file_name, cid_str)
+    if key in replicating_chunks:
+        replicating_chunks.discard(key)
+    print(f"[SERVER] REPLICATE_ACK {status} for {file_name} chunk {cid_str} from owner {owner} {reason}")
+    return None
+
+
 def handle_message(sock, data, addr):
     msg = data.decode(errors="ignore").strip()
     if not msg:
@@ -328,6 +438,8 @@ def handle_message(sock, data, addr):
         resp = handle_restore_result(parts, ok=False)
     elif cmd == "BACKUP_DONE":
         resp = handle_backup_done(parts, addr)
+    elif cmd == "REPLICATE_ACK":
+        resp = handle_replicate_ack(parts)
     else:
         rq = parts[1] if len(parts) > 1 else "0"
         resp = f"ERROR {rq} Unknown-command"
@@ -337,21 +449,28 @@ def handle_message(sock, data, addr):
 
 
 def heartbeat_monitor():
-    """Optional: periodically log peers that stopped sending heartbeats."""
+    """Periodically log peers that stopped sending heartbeats and trigger reallocation."""
     while True:
         time.sleep(HEARTBEAT_TIMEOUT)
         now = time.time()
+        to_drop = []
         with lock:
             for name, p in peers.items():
                 last = p.get("last_heartbeat", 0)
-                if last and now - last > HEARTBEAT_TIMEOUT:
+                if last and now - last > HEARTBEAT_TIMEOUT and p.get("alive", True):
                     print(f"[SERVER] WARNING: Peer {name} missed heartbeat (last {int(now-last)} s ago)")
+                    p["alive"] = False
+                    to_drop.append(name)
+        for name in to_drop:
+            remove_peer_from_chunks(name)
 
 
 def run_server():
     load_state()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((SERVER_HOST, SERVER_PORT))
+    global server_sock
+    server_sock = sock
     print(f"[SERVER] P2PBRS server listening on UDP {SERVER_HOST}:{SERVER_PORT}")
 
     threading.Thread(target=heartbeat_monitor, daemon=True).start()

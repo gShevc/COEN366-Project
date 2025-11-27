@@ -84,21 +84,41 @@ class P2PBRSClient:
     def send_udp_request(self, msg, verbose=True):
         """
         Send a UDP request to server and wait for a single reply.
+        Handles asynchronous REPLICATE_REQ messages if they arrive first.
         (No concurrent requests in this simple client.)
         """
         if verbose:
             print(f"[{self.name}] --> SERVER: {msg}")
+        orig_timeout = self.udp_sock.gettimeout()
         self.udp_sock.sendto(msg.encode(), (self.server_host, self.server_port))
-        try:
-            data, _ = self.udp_sock.recvfrom(8192)
+        deadline = time.time() + orig_timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                if verbose:
+                    print(f"[{self.name}] ERROR: no response from server (timeout)")
+                self.udp_sock.settimeout(orig_timeout)
+                return None
+            self.udp_sock.settimeout(remaining)
+            try:
+                data, _ = self.udp_sock.recvfrom(8192)
+            except socket.timeout:
+                if verbose:
+                    print(f"[{self.name}] ERROR: no response from server (timeout)")
+                self.udp_sock.settimeout(orig_timeout)
+                return None
+
             resp = data.decode(errors="ignore").strip()
+            if not resp:
+                continue
+            parts = resp.split()
+            if parts and parts[0].upper() == "REPLICATE_REQ":
+                self.handle_replicate_req(parts)
+                continue
             if verbose:
                 print(f"[{self.name}] <-- SERVER: {resp}")
+            self.udp_sock.settimeout(orig_timeout)
             return resp
-        except socket.timeout:
-            if verbose:
-                print(f"[{self.name}] ERROR: no response from server (timeout)")
-            return None
 
     # ---------------- Protocol operations ----------------
 
@@ -140,6 +160,28 @@ class P2PBRSClient:
         return len(
             [f for f in os.listdir(self.storage_dir) if f.endswith(".chunk")]
         )
+
+    def handle_replicate_req(self, parts):
+        # REPLICATE_REQ RQ# Owner File_Name Chunk_ID Target_Name Target_IP Target_TCP
+        if len(parts) != 8:
+            return
+        _, rq, owner, file_name, cid_str, target_name, target_ip, target_tcp_str = parts
+        try:
+            chunk_id = int(cid_str)
+            target_tcp = int(target_tcp_str)
+        except ValueError:
+            self.send_udp_request(f"REPLICATE_ACK {rq} {owner} {file_name} {cid_str} FAIL Invalid_ID", verbose=False)
+            return
+
+        print(f"[{self.name}] REPLICATE_REQ: send {file_name} chunk {chunk_id} to {target_name} at {target_ip}:{target_tcp}")
+        ok = self.send_existing_chunk_to_peer(target_ip, target_tcp, file_name, chunk_id)
+        status = "OK" if ok else "FAIL"
+        reason = "" if ok else " Send_failed"
+        ack = f"REPLICATE_ACK {rq} {owner} {file_name} {chunk_id} {status}{reason}"
+        try:
+            self.udp_sock.sendto(ack.encode(), (self.server_host, self.server_port))
+        except OSError as e:
+            print(f"[{self.name}] Failed to send REPLICATE_ACK: {e}")
 
     # ----- File backup (owner side) -----
 
@@ -247,7 +289,7 @@ class P2PBRSClient:
                         f"[{self.name}] Chunk {chunk_id} of {filename} stored successfully on "
                         f"{peer_ip}:{peer_tcp_port}"
                     )
-                    return
+                    return True
                 else:
                     print(
                         f"[{self.name}] Chunk {chunk_id} error from peer, attempt {attempts}: {line}"
@@ -264,6 +306,7 @@ class P2PBRSClient:
                     pass
 
         print(f"[{self.name}] Giving up on chunk {chunk_id} after 3 attempts.")
+        return False
 
     # ----- Storage side: TCP server -----
 
@@ -292,6 +335,16 @@ class P2PBRSClient:
     def chunk_path(self, file_name, chunk_id):
         safe_name = file_name.replace("/", "_").replace("\\", "_")
         return os.path.join(self.storage_dir, f"{safe_name}.{chunk_id}.chunk")
+
+    def send_existing_chunk_to_peer(self, peer_ip, peer_tcp_port, filename, chunk_id):
+        """Send a locally stored chunk to another peer (used for replication)."""
+        path = self.chunk_path(filename, chunk_id)
+        if not os.path.isfile(path):
+            print(f"[{self.name}] Replication failed: missing chunk {chunk_id} of {filename}")
+            return False
+        with open(path, "rb") as src:
+            data = src.read()
+        return self.send_chunk_to_peer(peer_ip, peer_tcp_port, filename, chunk_id, data)
 
     def handle_chunk_connection(self, conn, addr):
         try:
@@ -450,12 +503,16 @@ class P2PBRSClient:
         chunk_sources = {}
         for peer_name, ip, port, cids in assignments:
             for cid in cids:
-                chunk_sources[cid] = (ip, port)
+                chunk_sources.setdefault(cid, []).append((ip, port))
 
-        # Download all chunks
+        # Download all chunks, trying alternates if one peer fails
         chunks = {}
-        for cid, (ip, port) in chunk_sources.items():
-            chunk = self.fetch_chunk_from_peer(ip, port, filename, cid)
+        for cid, sources in chunk_sources.items():
+            chunk = None
+            for ip, port in sources:
+                chunk = self.fetch_chunk_from_peer(ip, port, filename, cid)
+                if chunk is not None:
+                    break
             if chunk is None:
                 print(f"[{self.name}] Failed to retrieve chunk {cid}")
                 continue
