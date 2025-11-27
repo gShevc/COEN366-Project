@@ -3,6 +3,7 @@ import threading
 import os
 import binascii
 import sys
+import time
 
 #########################################################
 # AUTO-INCREMENT PORT SYSTEM
@@ -54,6 +55,9 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 
 udp_socket = None
 LocalFiles = {}
+
+# Heartbeat Interval
+HEARTBEAT_INTERVAL = 5 # Send every 5 seconds
 
 clientsInfo = {
     "name": None,
@@ -297,6 +301,34 @@ def handle_CHUNK_OK(parts):
         udp_send(msg, SERVER_ADDR)
         print("[OWNER] All chunks OK. Sent BACKUP_DONE to server.")
 
+#########################################################
+# HEARTBEAT WORKER
+#########################################################
+
+def start_heartbeat_thread():
+    def heartbeat_loop():
+        print(f"[HEARTBEAT] Thread started. Sending every {HEARTBEAT_INTERVAL}s.")
+        while True:
+            # Only send heartbeat if clients are actually registered (have a name)
+            if clientsInfo["name"]:
+                try:
+                    # Count chunks stored in the directory
+                    num_chunks = len([name for name in os.listdir(STORAGE_DIR) if os.path.isfile(os.path.join(STORAGE_DIR, name))])
+                    
+                    timestamp = time.time()
+                    # Format: HEARTBEAT RQ# Name Number_Chunks# Timestamp
+                    # Using a dummy RQ "HB" because this is a periodic background task
+                    msg = f"HEARTBEAT|HB|{clientsInfo['name']}|{num_chunks}|{timestamp}|"
+                    
+                    udp_send(msg, SERVER_ADDR)
+                    print(f"[HEARTBEAT] Sent: {msg}") # Uncomment for debugging
+                except Exception as e:
+                    print(f"[HEARTBEAT] Error sending heartbeat: {e}")
+            
+            time.sleep(HEARTBEAT_INTERVAL)
+
+    t = threading.Thread(target=heartbeat_loop, daemon=True)
+    t.start()
 
 #########################################################
 # UDP LISTENER THREAD
@@ -352,6 +384,9 @@ if __name__ == "__main__":
     print(f"[INFO] Auto-assigned TCP port: {CLIENT_TCP_PORT}")
 
     threading.Thread(target=listen_udp, daemon=True).start()
+    
+    # Start the Heartbeat
+    start_heartbeat_thread()
 
     counter = 1
 

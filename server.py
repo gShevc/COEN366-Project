@@ -9,9 +9,13 @@ import math
 # GLOBAL STATE
 ###############################################
 
-RegisteredUsers = {}        # Name -> {Role, IP_Address, UDP_Port, TCP_Port, Capacity}
+RegisteredUsers = {}        # Name -> {Role, IP_Address, UDP_Port, TCP_Port, Capacity, last_seen}
 ServerRQ = 1                # Increment for any server-generated RQ (use with LOCK)
 LOCK = threading.Lock()     # Thread safety
+
+# Constants for Heartbeat
+HEARTBEAT_TIMEOUT = 15      # Seconds before a peer is considered dead
+CHECK_INTERVAL = 5          # How often the server checks for dead peers
 
 # Backup request state:
 # rq -> {
@@ -46,6 +50,40 @@ def findUserByAddr(addr):
                 return name
 
     return None
+
+
+###############################################
+# HEARTBEAT MONITOR
+###############################################
+
+def monitor_heartbeats():
+    """
+    Periodically checks if registered peers have sent a heartbeat recently.
+    If a peer times out, it is removed.
+    """
+    print("[MONITOR] Heartbeat monitor thread started.")
+    while True:
+        time.sleep(CHECK_INTERVAL)
+        
+        current_time = time.time()
+        to_remove = []
+
+        with LOCK:
+            for name, info in RegisteredUsers.items():
+                last_seen = info.get("last_seen", current_time)
+                
+                # Check if timeout exceeded
+                if current_time - last_seen > HEARTBEAT_TIMEOUT:
+                    print(f"[MONITOR] Peer '{name}' timed out. (Last seen {current_time - last_seen:.1f}s ago)")
+                    to_remove.append(name)
+
+            # Remove dead peers
+            for name in to_remove:
+                # In Section 2.5, this is where REPLICATE_REQ would be triggered
+                print(f"[FAILURE_HANDLING] Removing dead peer: {name}")
+                del RegisteredUsers[name]
+                
+                # TODO (Section 2.5): Trigger Recovery/Replication here if this peer held chunks
 
 
 ###############################################
@@ -85,7 +123,8 @@ def RegistrationCheck(data, addr, Name, Role, IP_Address, UDP_Port, TCP_Port, st
                 "UDP_Port": int(UDP_Port),
                 "TCP_Port": int(TCP_Port),
                 "Capacity": int(cap_val),
-                "socket": (IP_Address, int(UDP_Port))
+                "socket": (IP_Address, int(UDP_Port)),
+                "last_seen": time.time() # Initialize heartbeat timestamp
             }
             reply = f"REGISTERED|RQ{ServerRQ}|SUCCESS|"
             print(f"[REGISTER] User {Name} registered. Info: {RegisteredUsers[Name]}")
@@ -163,7 +202,7 @@ def differentChunkSizes(fileSize, minimumChunks, ownerName):
     return None
 
 ###############################################
-# STORAGE_TASK DISPATCH (no fake 'x')
+# STORAGE_TASK DISPATCH
 ###############################################
 
 def sendStorageRequests(potentialPeers, rq, fileName, chunkSize, ownerName):
@@ -311,6 +350,25 @@ def handle_BACKUP_DONE(parts):
         del BackupStates[rq]
 
 ###############################################
+# HEARTBEAT HANDLER
+###############################################
+
+def handle_HEARTBEAT(parts, addr):
+    # Format: HEARTBEAT|RQ#|Name|Number_Chunks#|Timestamp|
+    if len(parts) < 5:
+        return
+
+    name = parts[2]
+    
+    with LOCK:
+        if name in RegisteredUsers:
+            RegisteredUsers[name]["last_seen"] = time.time()
+            RegisteredUsers[name]["chunks_count"] = parts[3]
+            # print(f"[HEARTBEAT] Received from {name}") # Uncomment to debug
+        else:
+            pass
+
+###############################################
 # Main UDP packet dispatcher
 ###############################################
 
@@ -326,6 +384,9 @@ def handle_packet(data, addr):
     elif cmd == "DE-REGISTER":
         _, rq, Name = parts
         Deregistration(data, addr, Name)
+        
+    elif cmd == "HEARTBEAT":
+        handle_HEARTBEAT(parts, addr)
 
     elif cmd == "BACKUP_REQ":
         _, rq, fileName, fileSize, checksum = parts
@@ -371,6 +432,9 @@ if __name__ == "__main__":
 
     s = UDPConnection(HOST, PORT)
     print("[SERVER] Running...")
+    
+    # Start the Heartbeat Monitor Thread
+    threading.Thread(target=monitor_heartbeats, daemon=True).start()
 
     while True:
         data, addr = s.recvfrom(8192)
