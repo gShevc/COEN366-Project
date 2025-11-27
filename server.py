@@ -4,6 +4,7 @@ import threading
 import time
 import binascii
 
+
 ###############################################
 # GLOBAL STATE
 ###############################################
