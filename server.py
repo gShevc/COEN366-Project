@@ -41,7 +41,7 @@ def UDPConnection(self, HOST, PORT):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.bind((HOST, PORT))
-        print(f"Server UDP bound on {HOST}:{PORT}")
+        print(f"Server UDP bound on 127.0.0.1:{PORT}")
         return s
     except Exception as e:
         print("Socket bind failed:", e)
@@ -64,7 +64,7 @@ def RegistrationCheck(data, addr, Name, Role, IP_Address, UDP_Port, TCP_Port, st
                 "Capacity": int(storageCapacity)
             }
             reply = f"REGISTERED|RQ{ServerRQ}|SUCCESS|"
-            print(f"[REGISTER] User {Name} registered.")
+            print(f"[REGISTER] User {Name} registered. Role: {Role}, Host: {IP_Address}, UDP port: {UDP_Port}, TCP port: {TCP_Port}, capacity: {storageCapacity}")
         else:
             reply = f"REGISTER-DENIED|RQ{ServerRQ}|UserExists|"
             print(f"[REGISTER] User {Name} already exists.")

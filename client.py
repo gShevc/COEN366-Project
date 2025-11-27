@@ -8,10 +8,15 @@ import sys
 # CONFIG
 #########################################################
 
-CLIENT_HOST = "0.0.0.0"
-CLIENT_UDP_PORT = 9001      # CHANGE for each peer you run
-CLIENT_TCP_PORT = 9101      # CHANGE for each peer you run
-SERVER_ADDR = ("localhost", 8888)
+CLIENT_BIND_HOST = "0.0.0.0"            # for bind
+CLIENT_ADVERTISED_HOST = "127.0.0.1"    # for being reachable by others
+UDP_START_PORT = 9001
+TCP_START_PORT = 9101
+# These are set dynamically at startup to avoid collisions across clients.
+CLIENT_UDP_PORT = None
+CLIENT_TCP_PORT = None
+tcp_listener = None
+SERVER_ADDR = ("127.0.0.1", 8888)
 
 LOCAL_NAME = None
 LOCAL_ROLE = None
@@ -35,18 +40,16 @@ pending_backup = {
 # TCP FUNCTIONS (Option C)
 #########################################################
 
-def TCPConnection(host, port):
+def TCPConnection():
     """
-    Storage peer: binds & listens for incoming TCP chunk.
-    Returns the accepted connection and listener.
+    Storage peer: waits on the persistent listener for an incoming chunk.
     """
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind((host, port))
-    listener.listen(1)
-    print(f"[TCP-LISTEN] Listening for chunk on TCP {port}")
-    conn, addr = listener.accept()
+    if tcp_listener is None:
+        raise RuntimeError("TCP listener not initialized")
+    print(f"[TCP-LISTEN] Waiting on TCP {CLIENT_TCP_PORT}")
+    conn, addr = tcp_listener.accept()
     print(f"[TCP-LISTEN] Accepted connection from {addr}")
-    return conn, listener
+    return conn
 
 
 def TCPConnectAndSend(host, port, header_bytes, payload_bytes):
@@ -68,6 +71,36 @@ def udp_send(msg, addr):
 
 def crc32(data):
     return binascii.crc32(data) & 0xffffffff
+
+
+def find_available_port(start_port, sock_type):
+    """Find the first available port at or above start_port for the given socket type."""
+    port = start_port
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, sock_type) as test_sock:
+                test_sock.bind((CLIENT_BIND_HOST, port))
+            return port
+        except OSError:
+            port += 1
+
+
+def init_tcp_listener(start_port):
+    """
+    Bind once to an available TCP port and keep the listener open for the lifetime
+    of the client so the advertised port is always reachable.
+    """
+    port = start_port
+    while True:
+        try:
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            listener.bind((CLIENT_BIND_HOST, port))
+            listener.listen(5)
+            return listener, port
+        except OSError:
+            port += 1
 
 
 #########################################################
@@ -194,12 +227,12 @@ def handle_STORE_REQ(parts, addr):
     chunkID = int(parts[3])
     ownerUDP = int(parts[5])
 
-    # Start TCP listener
-    conn, listener = TCPConnection("0.0.0.0", CLIENT_TCP_PORT)
-
     # Inform owner the TCP port is ready
     msg = f"SEND_CHUNK|{rq}|{fileName}|{LOCAL_NAME}|{CLIENT_TCP_PORT}|"
     udp_send(msg, (addr[0], ownerUDP))
+
+    # Accept the incoming TCP connection for this chunk
+    conn = TCPConnection()
 
     # Receive chunk
     header = b""
@@ -220,7 +253,6 @@ def handle_STORE_REQ(parts, addr):
         chunk += data
         to_read -= len(data)
 
-    listener.close()
     conn.close()
 
     # Save chunk
@@ -299,9 +331,12 @@ def display_menu():
     print("4. Exit")
 
 if __name__ == "__main__":
+    CLIENT_UDP_PORT = find_available_port(UDP_START_PORT, socket.SOCK_DGRAM)
+    tcp_listener, CLIENT_TCP_PORT = init_tcp_listener(TCP_START_PORT)
+
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_socket.bind((CLIENT_HOST, CLIENT_UDP_PORT))
-    print(f"[UDP] Client running on {CLIENT_HOST}:{CLIENT_UDP_PORT}")
+    udp_socket.bind((CLIENT_BIND_HOST, CLIENT_UDP_PORT))
+    print(f"Client running on {CLIENT_ADVERTISED_HOST}: [UDP] {CLIENT_UDP_PORT}, [TCP] {CLIENT_TCP_PORT}")
 
     threading.Thread(target=listen_udp, daemon=True).start()
 
@@ -314,8 +349,11 @@ if __name__ == "__main__":
         if c == "1":
             LOCAL_NAME = input("Name: ")
             LOCAL_ROLE = input("Role (BOTH/STORAGE/OWNER): ")
-            RegisterClient(f"RQ{counter}", LOCAL_NAME, LOCAL_ROLE,
-                           CLIENT_HOST, CLIENT_UDP_PORT, CLIENT_TCP_PORT, 1024)
+            if LOCAL_ROLE == "BOTH" or LOCAL_ROLE == "STORAGE":
+                STORAGE_CAPACITY = input("Storage Capacity (MB): ")
+            else: STORAGE_CAPACITY = 0
+
+            RegisterClient(f"RQ{counter}", LOCAL_NAME, LOCAL_ROLE, CLIENT_ADVERTISED_HOST, CLIENT_UDP_PORT, CLIENT_TCP_PORT, STORAGE_CAPACITY)
             counter += 1
 
         elif c == "2":
@@ -336,6 +374,10 @@ if __name__ == "__main__":
             counter += 1
 
         elif c == "4":
+            if tcp_listener:
+                tcp_listener.close()
+            if udp_socket:
+                udp_socket.close()
             sys.exit()
 
         else:
