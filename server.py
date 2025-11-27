@@ -1,4 +1,3 @@
-# server.py (fixed)
 import socket
 import sys
 import threading
@@ -204,19 +203,24 @@ def sendStorageRequests(potentialPeers, rq, fileName, chunkSize, ownerName):
 ###############################################
 
 def send_BACKUP_PLAN(rq):
-    with LOCK:
-        if rq not in BackupStates:
-            print(f"[SERVER] send_BACKUP_PLAN: unknown rq {rq}")
-            return
+    #with LOCK:
+    if rq not in BackupStates:
+        print(f"[SERVER] send_BACKUP_PLAN: unknown rq {rq}")
+        return
+    else:
+        print("[SERVER] Generating BACKUP_PLAN for rq", rq)
         st = BackupStates[rq]
         fileName = st["fileName"]
         chunkSize = st["chunkSize"]
         chosen = st["peers"]
         ownerAddr = st["ownerAddr"]
 
-    # Build peer list with connection info
-    peerStrings = []
+    if (len(chosen) ==0) :
+        print(f"[SERVER] send_BACKUP_PLAN: no peers chosen for rq {rq}")
+    
+    peerStrings = [] # Build peer list with connection info
     for p in chosen:
+        print(f"[SERVER] Adding peer {p} to BACKUP_PLAN for rq={rq}")
         info = RegisteredUsers[p]
         if not info:
             continue

@@ -189,6 +189,7 @@ def handle_BACKUP_PLAN(parts):
     # Send STORE_REQ to storage peers
     for i, (name, ip, udp, tcp) in enumerate(peers):
         msg = f"STORE_REQ|{rq}|{fileName}|{i}|{clientsInfo['name']}|{CLIENT_UDP_PORT}|{CLIENT_TCP_PORT}|"
+        print(msg)
         udp_send(msg, (ip, udp))
 
     print(f"[BACKUP_PLAN] Sent STORE_REQ to all peers for file {fileName}")
