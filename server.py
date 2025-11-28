@@ -15,12 +15,12 @@ CHUNK_SIZE = 4096  # bytes (server-chosen chunk size)
 HEARTBEAT_TIMEOUT = 60  # seconds, used only for logging
 
 
-# Use a re-entrant lock because some handlers (e.g., REGISTER) call
+# Use a re-entrant lock because some handlers (REGISTER) call
 # helper functions that also acquire the same lock.
 lock = threading.RLock()
 # UDP socket used by background threads to push control messages.
 server_sock = None
-# Simple server-side RQ# generator for internal messages (e.g., REPLICATE_REQ).
+# Simple server-side RQ# generator for internal messages (REPLICATE_REQ).
 _server_rq_counter = itertools.count(100000)
 
 
@@ -31,26 +31,81 @@ def next_server_rq():
 # Track chunks currently being replicated to avoid spamming requests.
 replicating_chunks = set()  # (owner, file_name, chunk_id_str)
 
-# In-memory state (persisted to JSON)
-# peers: name -> {
-#   "role": "OWNER"/"STORAGE"/"BOTH",
-#   "ip": str,
-#   "udp_port": int,
-#   "tcp_port": int,
-#   "storage_capacity": str,
-#   "last_heartbeat": float (not persisted),
-# }
-peers = {}
 
-# files: key "owner|file_name" -> {
-#   "owner": str,
-#   "file_name": str,
-#   "size": int,
-#   "checksum": str,   # full file checksum from BACKUP_REQ
-#   "chunk_size": int,
-#   "num_chunks": int,
-#   "chunks": { "chunk_id_str": [peer_name, ...] }  # which peers host which chunk
-# }
+def parse_capacity(cap_str):
+    """Extract an integer capacity from strings like '1024MB' or '1024'."""
+    try:
+        digits = "".join(ch for ch in str(cap_str) if ch.isdigit())
+        if digits:
+            return int(digits)
+        return int(cap_str)
+    except Exception:
+        return 0
+
+
+def different_chunk_sizes(file_size, minimum_chunks, owner_name):
+    """
+    Compute a chunkSize and a list of available peers excluding owner_name.
+    - Try chunks = minimumChunks, minimumChunks+1, ..., up to number of eligible peers.
+    - Use ceil division for chunkSize so all bytes are accounted for.
+    Returns dict with {"size": chunkSize, "availablePeers": [...], "requiredChunks": chunks}
+    or None if impossible.
+    """
+    file_size = int(file_size)
+    chunks = int(minimum_chunks)
+
+    eligible = {
+        name: info
+        for name, info in peers.items()
+        if name != owner_name
+        and info.get("role", "").upper() in ("STORAGE", "BOTH")
+        and info.get("alive", True)
+    }
+    if not eligible:
+        return None
+
+    max_peers = len(eligible)
+    while chunks <= max_peers:
+        chunk_size = math.ceil(file_size / chunks)
+        available = []
+        for name, info in eligible.items():
+            try:
+                if parse_capacity(info.get("storage_capacity", 0)) >= int(chunk_size):
+                    available.append(name)
+            except Exception:
+                continue
+        if len(available) >= chunks:
+            return {
+                "size": int(chunk_size),
+                "availablePeers": available,
+                "requiredChunks": int(chunks),
+            }
+        chunks += 1
+    return None
+
+"""
+In-memory state (persisted to JSON)
+peers: name -> {
+  "role": "OWNER"/"STORAGE"/"BOTH",
+  "ip": str,
+  "udp_port": int,
+  "tcp_port": int,
+  "storage_capacity": str,
+  "last_heartbeat": float (not persisted),
+}
+"""
+peers = {}
+"""
+files: key "owner|file_name" -> {
+  "owner": str,
+  "file_name": str,
+  "size": int,
+  "checksum": str,   # full file checksum from BACKUP_REQ
+  "chunk_size": int,
+  "num_chunks": int,
+  "chunks": { "chunk_id_str": [peer_name, ...] }  # which peers host which chunk
+}
+"""
 files = {}
 
 
@@ -231,31 +286,33 @@ def handle_backup_req(parts, addr):
         return f"BACKUP-DENIED {rq} Invalid-File_Size"
 
     with lock:
-        # Select storage-capable peers (STORAGE or BOTH)
-        storage_peers = [
-            name for name, p in peers.items()
-            if p["role"] in ("STORAGE", "BOTH") and p.get("alive", True)
-        ]
-
-        if not storage_peers:
+        plan = different_chunk_sizes(file_size, 1, owner)
+        if not plan:
             return f"BACKUP-DENIED {rq} No-storage-peers"
 
-        num_chunks = math.ceil(file_size / CHUNK_SIZE)
-        if num_chunks == 0:
-            num_chunks = 1
+        chunk_size = plan["size"]
+        num_chunks = plan["requiredChunks"]
+        available = plan["availablePeers"]
 
-        # Round-robin assignment: each chunk gets one or more storage peers (replicas)
-        replicas = min(2, len(storage_peers))  # aim for 2-way redundancy when possible
+        if len(available) < 2:
+            return f"BACKUP-DENIED {rq} Insufficient-replicas"
+
+        # Assign two distinct peers per chunk (replicated) in round-robin fashion.
+        replicas = 2
         chunk_to_peers = {}
         peer_assignments = {}  # peer_name -> [chunk_ids]
         idx = 0
         for chunk_id in range(num_chunks):
             cid_str = str(chunk_id)
+            assigned = []
             for r in range(replicas):
-                peer_name = storage_peers[idx % len(storage_peers)]
-                idx += 1
+                peer_name = available[(idx + r) % len(available)]
+                if peer_name in assigned:
+                    continue
+                assigned.append(peer_name)
                 chunk_to_peers.setdefault(cid_str, []).append(peer_name)
                 peer_assignments.setdefault(peer_name, []).append(chunk_id)
+            idx += 1
 
         key = f"{owner}|{file_name}"
         files[key] = {
@@ -263,14 +320,14 @@ def handle_backup_req(parts, addr):
             "file_name": file_name,
             "size": file_size,
             "checksum": checksum,
-            "chunk_size": CHUNK_SIZE,
+            "chunk_size": chunk_size,
             "num_chunks": num_chunks,
             "chunks": chunk_to_peers,
         }
         save_state()
 
         # Build Peer_List as:
-        # [PeerA@ip:tcp:0,2;PeerB@ip:tcp:1,3]
+        # [PeerA@ip:tcp:0;PeerB@ip:tcp:1]
         segs = []
         for peer_name, chunk_ids in peer_assignments.items():
             p = peers[peer_name]
@@ -280,7 +337,7 @@ def handle_backup_req(parts, addr):
 
     print(f"[SERVER] BACKUP_REQ from {owner} for '{file_name}', {file_size} bytes, "
           f"{num_chunks} chunks -> peers {', '.join(peer_assignments.keys())}")
-    return f"BACKUP_PLAN {rq} {file_name} {peer_list_str} {CHUNK_SIZE}"
+    return f"BACKUP_PLAN {rq} {file_name} {peer_list_str} {chunk_size}"
 
 
 def handle_store_ack(parts, addr):
